@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* ==========================================================================
+     FairPoint Design System - Design Tokens (Figma Mapped 1:1)
+     ========================================================================== */
+
+  /* User Primitives */
+  --color-user-1: #2563eb;
+  --color-user-2: #e11d48;
+  --color-user-3: #059669;
+  --color-user-4: #7c3aed;
+  --color-intersection: #f59e0b;
+
+  /* Semantic Surfaces & Text */
+  --surface-overlay: #ffffffe5;
+  --surface-card: #ffffff;
+  --border-default: #e2e8f0;
+  --text-primary: #0f172a;
+  --text-secondary: #64748b;
+
+  /* Spacing Scale */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 24px;
+
+  /* Border Radius */
+  --radius-control: 8px;
+  --radius-card: 16px;
+  --radius-pill: 9999px;
+}
+
+/* ==========================================================================
+   Semantic Theme Helper Classes
+   ========================================================================== */
+
+/* User 1 */
+.user-1-bg {
+  background-color: var(--color-user-1);
+}
+.user-1-border {
+  border-color: var(--color-user-1);
+}
+.user-1-text {
+  color: var(--color-user-1);
+}
+.user-1-ring {
+  --tw-ring-color: var(--color-user-1);
+}
+
+/* User 2 */
+.user-2-bg {
+  background-color: var(--color-user-2);
+}
+.user-2-border {
+  border-color: var(--color-user-2);
+}
+.user-2-text {
+  color: var(--color-user-2);
+}
+.user-2-ring {
+  --tw-ring-color: var(--color-user-2);
+}
+
+/* User 3 */
+.user-3-bg {
+  background-color: var(--color-user-3);
+}
+.user-3-border {
+  border-color: var(--color-user-3);
+}
+.user-3-text {
+  color: var(--color-user-3);
+}
+.user-3-ring {
+  --tw-ring-color: var(--color-user-3);
+}
+
+/* User 4 */
+.user-4-bg {
+  background-color: var(--color-user-4);
+}
+.user-4-border {
+  border-color: var(--color-user-4);
+}
+.user-4-text {
+  color: var(--color-user-4);
+}
+.user-4-ring {
+  --tw-ring-color: var(--color-user-4);
+}
+
+/* Intersection */
+.intersection-bg {
+  background-color: var(--color-intersection);
+}
+.intersection-border {
+  border-color: var(--color-intersection);
+}
+.intersection-text {
+  color: var(--color-intersection);
+}
+.intersection-ring {
+  --tw-ring-color: var(--color-intersection);
+}
