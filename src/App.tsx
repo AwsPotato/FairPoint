@@ -1,6 +1,5 @@
 import React, { useRef, useState, useCallback } from 'react';
 import * as maplibregl from 'maplibre-gl';
-import * as turf from '@turf/turf';
 import { 
   Sparkles, 
   CheckCircle2, 
@@ -9,13 +8,19 @@ import {
   Crosshair,
   Layers,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  MapPin
 } from 'lucide-react';
 import { MapCanvas, MapCanvasHandle } from './components/MapCanvas';
 import { OriginSearchPanel, Participant } from './components/OriginSearchPanel';
+import { 
+  generateMockIsochrones, 
+  IsochroneComputationResult, 
+  UserOriginInput 
+} from './utils/mockIsochrones';
 import { tokens, UserThemeId } from './tokens';
 
-interface UserLocation {
+interface UserLocationDef {
   id: UserThemeId;
   name: string;
   label: string;
@@ -23,7 +28,7 @@ interface UserLocation {
   coords: [number, number]; // [lng, lat]
 }
 
-const INITIAL_USER_LOCATIONS: Record<UserThemeId, UserLocation> = {
+const DEFAULT_USER_COORDS: Record<UserThemeId, UserLocationDef> = {
   1: { id: 1, name: 'Person 1', label: 'Cobalt Blue', color: tokens.colors.user1, coords: [8.532, 47.377] },
   2: { id: 2, name: 'Person 2', label: 'Rose Red', color: tokens.colors.user2, coords: [8.552, 47.388] },
   3: { id: 3, name: 'Person 3', label: 'Emerald Green', color: tokens.colors.user3, coords: [8.528, 47.362] },
@@ -32,123 +37,94 @@ const INITIAL_USER_LOCATIONS: Record<UserThemeId, UserLocation> = {
 
 export const App: React.FC = () => {
   const mapRef = useRef<MapCanvasHandle>(null);
-  const markersRef = useRef<maplibregl.Marker[]>([]);
-  const intersectionMarkerRef = useRef<maplibregl.Marker | null>(null);
-
-  const [activeUser, setActiveUser] = useState<UserThemeId>(1);
-  const [midpointCoords, setMidpointCoords] = useState<[number, number] | null>(null);
   const [mapReady, setMapReady] = useState(false);
+  const [isochroneData, setIsochroneData] = useState<IsochroneComputationResult | null>(null);
+  const [activeUser, setActiveUser] = useState<UserThemeId>(1);
   const [showTokensPanel, setShowTokensPanel] = useState(false);
 
-  // Updates markers on the map based on active participants
-  const updateMapForParticipants = useCallback((participants: Participant[], map: maplibregl.Map) => {
-    // Clear old user markers
-    markersRef.current.forEach((m) => m.remove());
-    markersRef.current = [];
-
-    // Filter locations for existing participants
-    const activeLocations = participants.map((p) => INITIAL_USER_LOCATIONS[p.id]);
-    const points = activeLocations.map((u) => turf.point(u.coords));
-    const featureCollection = turf.featureCollection(points);
-    const centerPoint = turf.center(featureCollection);
-    const centerLngLat = centerPoint.geometry.coordinates as [number, number];
-    setMidpointCoords(centerLngLat);
-
-    // Update or create intersection marker
-    if (intersectionMarkerRef.current) {
-      intersectionMarkerRef.current.setLngLat(centerLngLat);
-    } else {
-      const intersectionEl = document.createElement('div');
-      intersectionEl.className =
-        'w-8 h-8 rounded-full bg-intersection border-2 border-white shadow-xl flex items-center justify-center animate-pulse cursor-pointer';
-      intersectionEl.innerHTML = `<span style="font-size: 10px; font-weight: 800; color: white;">FP</span>`;
-
-      const marker = new maplibregl.Marker({ element: intersectionEl })
-        .setLngLat(centerLngLat)
-        .setPopup(
-          new maplibregl.Popup({ offset: 25 }).setHTML(
-            `<div style="font-family: sans-serif; padding: 4px;">
-              <strong style="color: #F59E0B; font-size: 13px;">FairPoint (Optimal Hub)</strong>
-              <p style="margin: 4px 0 0; color: #475569; font-size: 11px;">Calculated intersection via Turf.js</p>
-            </div>`
-          )
-        )
-        .addTo(map);
-      intersectionMarkerRef.current = marker;
-    }
-
-    // Add Markers for active participants
-    activeLocations.forEach((user) => {
-      const userEl = document.createElement('div');
-      userEl.className =
-        'w-6 h-6 rounded-full border-2 border-white shadow-md flex items-center justify-center cursor-pointer transition-transform hover:scale-125';
-      userEl.style.backgroundColor = user.color;
-      userEl.innerHTML = `<span style="font-size: 9px; font-weight: 700; color: white;">${user.id}</span>`;
-
-      const marker = new maplibregl.Marker({ element: userEl })
-        .setLngLat(user.coords)
-        .setPopup(
-          new maplibregl.Popup({ offset: 20 }).setHTML(
-            `<div style="font-family: sans-serif; padding: 4px;">
-              <strong style="color: ${user.color}; font-size: 13px;">${user.name}</strong>
-              <div style="font-size: 11px; color: #64748b;">${user.label}</div>
-            </div>`
-          )
-        )
-        .addTo(map);
-
-      markersRef.current.push(marker);
+  // Helper to run mock isochrone calculation from participants
+  const runCalculation = useCallback((participants: Participant[]) => {
+    const inputs: UserOriginInput[] = participants.map((p) => {
+      const def = DEFAULT_USER_COORDS[p.id];
+      return {
+        id: p.id,
+        coords: def.coords,
+        color: p.color,
+        name: p.label,
+        mode: p.mode,
+      };
     });
 
-    // Fit map bounds
-    const bbox = turf.bbox(featureCollection);
-    map.fitBounds(
-      [
-        [bbox[0], bbox[1]],
-        [bbox[2], bbox[3]],
-      ],
-      { padding: { top: 120, bottom: 120, left: 420, right: 100 }, maxZoom: 14 }
-    );
+    const result = generateMockIsochrones(inputs);
+    setIsochroneData(result);
+    return result;
   }, []);
 
   // Map ready callback
-  const handleMapReady = useCallback(
-    (map: maplibregl.Map) => {
-      setMapReady(true);
-      // Initialize with default 2 users
-      const initialParticipants: Participant[] = [
-        { id: 1, label: 'Person 1', address: '', mode: 'transit', color: tokens.colors.user1, colorName: 'Cobalt Blue' },
-        { id: 2, label: 'Person 2', address: '', mode: 'transit', color: tokens.colors.user2, colorName: 'Rose Red' },
-      ];
-      updateMapForParticipants(initialParticipants, map);
-    },
-    [updateMapForParticipants]
-  );
+  const handleMapReady = useCallback((map: maplibregl.Map) => {
+    setMapReady(true);
 
-  // Handle 'Find FairPoint' from OriginSearchPanel
+    // Initial calculation for 2 participants
+    const initialParticipants: Participant[] = [
+      { id: 1, label: 'Person 1', address: 'Bahnhofstrasse 1, Zurich', mode: 'transit', color: tokens.colors.user1, colorName: 'Cobalt Blue' },
+      { id: 2, label: 'Person 2', address: 'Universitatstrasse, Zurich', mode: 'transit', color: tokens.colors.user2, colorName: 'Rose Red' },
+    ];
+
+    const result = runCalculation(initialParticipants);
+
+    // Fit initial bounding box with padding for floating panels
+    map.fitBounds(
+      [
+        [result.bbox[0], result.bbox[1]],
+        [result.bbox[2], result.bbox[3]],
+      ],
+      {
+        padding: { top: 100, bottom: 100, left: 430, right: 100 },
+        duration: 1200,
+        maxZoom: 14,
+      }
+    );
+  }, [runCalculation]);
+
+  // Wire 'Find FairPoint' button in OriginSearchPanel to trigger calculation
   const handleFindFairPoint = async (participants: Participant[]) => {
     const map = mapRef.current;
-    if (!map) return;
-
-    // Simulate route/centroid calculation
+    
+    // Simulate brief algorithmic computation
     await new Promise((resolve) => setTimeout(resolve, 600));
-    updateMapForParticipants(participants, map);
 
-    if (midpointCoords) {
-      map.flyTo({
-        center: midpointCoords,
-        zoom: 13.5,
-        essential: true,
-      });
+    const result = runCalculation(participants);
+
+    if (map) {
+      if (result.fairpointCentroid) {
+        map.flyTo({
+          center: result.fairpointCentroid,
+          zoom: 13.5,
+          essential: true,
+          duration: 1400,
+        });
+      } else {
+        map.fitBounds(
+          [
+            [result.bbox[0], result.bbox[1]],
+            [result.bbox[2], result.bbox[3]],
+          ],
+          {
+            padding: { top: 100, bottom: 100, left: 430, right: 100 },
+            duration: 1200,
+          }
+        );
+      }
     }
   };
 
-  const focusUser = (user: UserLocation) => {
-    setActiveUser(user.id);
+  const focusUser = (userId: UserThemeId) => {
+    setActiveUser(userId);
     const map = mapRef.current;
-    if (map) {
+    const target = isochroneData?.userCentroids.find((u) => u.id === userId);
+    if (map && target) {
       map.flyTo({
-        center: user.coords,
+        center: target.coords,
         zoom: 14.5,
         essential: true,
       });
@@ -157,25 +133,45 @@ export const App: React.FC = () => {
 
   const focusFairpoint = () => {
     const map = mapRef.current;
-    if (map && midpointCoords) {
+    if (map && isochroneData?.fairpointCentroid) {
       map.flyTo({
-        center: midpointCoords,
+        center: isochroneData.fairpointCentroid,
         zoom: 14,
         essential: true,
       });
     }
   };
 
+  const fitAll = () => {
+    const map = mapRef.current;
+    if (map && isochroneData) {
+      map.fitBounds(
+        [
+          [isochroneData.bbox[0], isochroneData.bbox[1]],
+          [isochroneData.bbox[2], isochroneData.bbox[3]],
+        ],
+        {
+          padding: { top: 100, bottom: 100, left: 430, right: 100 },
+          duration: 1000,
+        }
+      );
+    }
+  };
+
   return (
     <div className="relative w-screen h-screen overflow-hidden select-none">
-      {/* Basemap Canvas in background */}
-      <MapCanvas ref={mapRef} onMapReady={handleMapReady} />
+      {/* Basemap Canvas in background with GeoJSON layers & markers */}
+      <MapCanvas
+        ref={mapRef}
+        isochroneData={isochroneData}
+        onMapReady={handleMapReady}
+      />
 
       {/* Relative overlay container with pointer-events-none */}
       <div className="relative z-10 pointer-events-none w-full h-full min-h-screen flex flex-col justify-between p-4 md:p-6">
-        {/* Top Bar with Brand & Floating Controls */}
+        {/* Top Header Bar */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-          {/* Top Brand Pill */}
+          {/* Brand Pill */}
           <div className="bg-surface-card/90 backdrop-blur-md rounded-2xl border border-border-default/80 px-4 py-2.5 shadow-lg flex items-center space-x-3 pointer-events-auto">
             <div className="w-8 h-8 rounded-xl bg-amber-500/15 flex items-center justify-center border border-amber-500/30 text-intersection">
               <Sparkles className="w-4 h-4 text-intersection" />
@@ -186,17 +182,17 @@ export const App: React.FC = () => {
                   FairPoint
                 </span>
                 <span className="text-[10px] font-semibold uppercase tracking-wider bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full border border-amber-200">
-                  Carto Positron
+                  Isochrone Intersect
                 </span>
               </div>
             </div>
           </div>
 
-          {/* Right Status Badge */}
+          {/* Right Status Badges & Quick Action */}
           <div className="hidden sm:flex items-center gap-2 pointer-events-auto">
             <div className="bg-surface-card/90 backdrop-blur-md rounded-xl border border-border-default/80 px-3 py-1.5 shadow-sm flex items-center gap-2 text-xs font-medium text-content-primary">
               <CheckCircle2 className="w-3.5 h-3.5 text-user-3" />
-              <span>{mapReady ? 'Basemap Vector Active' : 'Connecting...'}</span>
+              <span>{mapReady ? 'Isochrone Engine Active' : 'Loading Map...'}</span>
             </div>
             <button
               onClick={() => setShowTokensPanel((v) => !v)}
@@ -209,12 +205,12 @@ export const App: React.FC = () => {
           </div>
         </div>
 
-        {/* Floating Top-Left Area: Origin Search Panel */}
+        {/* Floating Top-Left Area: OriginSearchPanel */}
         <div className="flex flex-col md:flex-row gap-4 items-start my-auto">
           {/* Main Origin Search Panel (Floating in top-left) */}
           <OriginSearchPanel onFindFairPoint={handleFindFairPoint} />
 
-          {/* Optional Collapsible Token Palette Drawer */}
+          {/* Optional Tokens Drawer */}
           {showTokensPanel && (
             <aside className="pointer-events-auto w-80 bg-surface-card/95 backdrop-blur-md rounded-2xl border border-border-default/80 p-4 shadow-xl space-y-3 animate-in fade-in slide-in-from-top-2">
               <div className="flex items-center justify-between border-b border-border-default pb-2">
@@ -227,17 +223,20 @@ export const App: React.FC = () => {
               </div>
 
               <div className="space-y-1.5">
-                {Object.values(INITIAL_USER_LOCATIONS).map((user) => {
+                {Object.values(DEFAULT_USER_COORDS).map((user) => {
                   const isSelected = activeUser === user.id;
+                  const isPresent = isochroneData?.userCentroids.some((u) => u.id === user.id);
+
                   return (
                     <button
                       key={user.id}
-                      onClick={() => focusUser(user)}
+                      onClick={() => focusUser(user.id)}
+                      disabled={!isPresent}
                       className={`w-full p-2 rounded-xl border text-left transition-all flex items-center justify-between text-xs ${
                         isSelected
                           ? 'border-transparent ring-2 ring-offset-1'
                           : 'border-border-default hover:bg-slate-50'
-                      }`}
+                      } ${!isPresent ? 'opacity-40 cursor-not-allowed' : ''}`}
                       style={{
                         borderColor: isSelected ? user.color : undefined,
                         backgroundColor: isSelected ? `${user.color}0D` : undefined,
@@ -251,6 +250,11 @@ export const App: React.FC = () => {
                         <span className="font-medium text-slate-800">{user.name}</span>
                         <span className="text-[10px] text-slate-400 font-mono">{user.color}</span>
                       </div>
+                      {isPresent && (
+                        <span className="text-[10px] text-emerald-600 font-semibold bg-emerald-50 px-1.5 py-0.5 rounded">
+                          Active
+                        </span>
+                      )}
                     </button>
                   );
                 })}
@@ -275,14 +279,20 @@ export const App: React.FC = () => {
         <footer className="pointer-events-auto flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="bg-surface-card/90 backdrop-blur-md rounded-2xl border border-border-default/80 px-4 py-2.5 shadow-lg flex items-center gap-4 text-xs">
             <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-intersection animate-ping" />
+              <span className="w-2.5 h-2.5 rounded-full bg-intersection animate-ping" />
               <span className="font-semibold text-content-primary">FairPoint Midpoint:</span>
             </div>
-            <span className="font-mono text-content-secondary bg-slate-100 px-2 py-0.5 rounded">
-              {midpointCoords
-                ? `${midpointCoords[0].toFixed(4)}°E, ${midpointCoords[1].toFixed(4)}°N`
-                : 'Computing with Turf.js...'}
+            <span className="font-mono text-content-secondary bg-slate-100 px-2 py-0.5 rounded flex items-center gap-1">
+              <MapPin className="w-3 h-3 text-intersection" />
+              {isochroneData?.fairpointCentroid
+                ? `${isochroneData.fairpointCentroid[0].toFixed(4)}°E, ${isochroneData.fairpointCentroid[1].toFixed(4)}°N`
+                : 'Computing intersection...'}
             </span>
+            {isochroneData?.intersectionPolygon && (
+              <span className="hidden md:inline-flex items-center gap-1 text-[11px] font-medium text-amber-800 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
+                Overlap Area Identified
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
@@ -293,20 +303,7 @@ export const App: React.FC = () => {
               <Navigation2 className="w-3.5 h-3.5" /> Center on FairPoint
             </button>
             <button
-              onClick={() => {
-                const map = mapRef.current;
-                if (map) {
-                  const points = Object.values(INITIAL_USER_LOCATIONS).map((u) => turf.point(u.coords));
-                  const bbox = turf.bbox(turf.featureCollection(points));
-                  map.fitBounds(
-                    [
-                      [bbox[0], bbox[1]],
-                      [bbox[2], bbox[3]],
-                    ],
-                    { padding: { top: 120, bottom: 120, left: 420, right: 100 }, maxZoom: 14 }
-                  );
-                }
-              }}
+              onClick={fitAll}
               className="bg-surface-card/90 hover:bg-white text-content-primary border border-border-default/80 font-medium text-xs px-3.5 py-2.5 rounded-xl shadow-md transition-all flex items-center gap-1.5 active:scale-95"
             >
               <Maximize2 className="w-3.5 h-3.5 text-content-secondary" /> Fit All
