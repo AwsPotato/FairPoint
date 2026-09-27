@@ -7,6 +7,9 @@ export interface MapCanvasProps {
   initialZoom?: number;
   styleUrl?: string;
   isochroneData?: IsochroneComputationResult | null;
+  activeUserId?: 1 | 2 | 3 | 4;
+  onUserMarkerDragEnd?: (userId: 1 | 2 | 3 | 4, coords: [number, number]) => void;
+  onMapClick?: (coords: [number, number]) => void;
   onMapReady?: (map: maplibregl.Map) => void;
   className?: string;
 }
@@ -18,6 +21,9 @@ export const MapCanvas = forwardRef<MapCanvasHandle, MapCanvasProps>(({
   initialZoom = 13,
   styleUrl = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
   isochroneData,
+  activeUserId = 1,
+  onUserMarkerDragEnd,
+  onMapClick,
   onMapReady,
   className = '',
 }, ref) => {
@@ -26,12 +32,23 @@ export const MapCanvas = forwardRef<MapCanvasHandle, MapCanvasProps>(({
   const markersRef = useRef<maplibregl.Marker[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
 
+  // Keep callback refs fresh to avoid stale closures in event listeners
+  const onUserMarkerDragEndRef = useRef(onUserMarkerDragEnd);
+  onUserMarkerDragEndRef.current = onUserMarkerDragEnd;
+
+  const onMapClickRef = useRef(onMapClick);
+  onMapClickRef.current = onMapClick;
+
   // Expose the underlying map instance to parent via ref
   useImperativeHandle(ref, () => mapInstanceRef.current as maplibregl.Map, []);
 
-  const updateIsochroneLayers = (map: maplibregl.Map, data: IsochroneComputationResult | null | undefined) => {
+  const updateIsochroneLayers = (
+    map: maplibregl.Map,
+    data: IsochroneComputationResult | null | undefined,
+    currentActiveId: 1 | 2 | 3 | 4
+  ) => {
     if (!map.isStyleLoaded()) {
-      map.once('style.load', () => updateIsochroneLayers(map, data));
+      map.once('style.load', () => updateIsochroneLayers(map, data, currentActiveId));
       return;
     }
 
@@ -105,30 +122,51 @@ export const MapCanvas = forwardRef<MapCanvasHandle, MapCanvasProps>(({
       });
     }
 
-    // 3. Turf centroid markers for each user origin and the resulting FairPoint midpoint
+    // 3. Clear existing markers
     markersRef.current.forEach((m) => m.remove());
     markersRef.current = [];
 
     if (data) {
-      // User origin centroid markers
+      // User origin centroid markers (DRAGGABLE)
       data.userCentroids.forEach((uc) => {
-        const el = document.createElement('div');
-        el.className =
-          'w-6 h-6 rounded-full border-2 border-white shadow-lg flex items-center justify-center cursor-pointer transition-transform hover:scale-125';
-        el.style.backgroundColor = uc.color;
-        el.innerHTML = `<span style="font-size: 9px; font-weight: 800; color: white;">U${uc.id}</span>`;
+        const isSelected = uc.id === currentActiveId;
 
-        const marker = new maplibregl.Marker({ element: el })
+        const el = document.createElement('div');
+        el.className = `group relative cursor-grab active:cursor-grabbing transition-transform select-none`;
+        el.innerHTML = `
+          <div class="w-7 h-7 rounded-full border-2 border-white shadow-xl flex items-center justify-center transition-all ${
+            isSelected ? 'ring-4 ring-offset-1 ring-slate-900 scale-110' : 'hover:scale-110'
+          }" style="background-color: ${uc.color}">
+            <span style="font-size: 10px; font-weight: 800; color: white;">U${uc.id}</span>
+          </div>
+          <div class="absolute -bottom-5 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity bg-slate-900 text-white text-[9px] px-1.5 py-0.5 rounded shadow pointer-events-none whitespace-nowrap">
+            Drag to move
+          </div>
+        `;
+
+        // Instantiate with draggable: true
+        const marker = new maplibregl.Marker({
+          element: el,
+          draggable: true,
+        })
           .setLngLat(uc.coords)
           .setPopup(
             new maplibregl.Popup({ offset: 20 }).setHTML(
               `<div style="font-family: sans-serif; padding: 4px;">
                 <strong style="color: ${uc.color}; font-size: 13px;">${uc.name}</strong>
-                <div style="font-size: 11px; color: #64748b;">Origin Centroid</div>
+                <div style="font-size: 11px; color: #64748b;">Draggable Origin Pin</div>
               </div>`
             )
           )
           .addTo(map);
+
+        // Listen to marker dragend to update coordinates and re-run calculations
+        marker.on('dragend', () => {
+          const lngLat = marker.getLngLat();
+          if (onUserMarkerDragEndRef.current) {
+            onUserMarkerDragEndRef.current(uc.id as 1 | 2 | 3 | 4, [lngLat.lng, lngLat.lat]);
+          }
+        });
 
         markersRef.current.push(marker);
       });
@@ -137,8 +175,8 @@ export const MapCanvas = forwardRef<MapCanvasHandle, MapCanvasProps>(({
       if (data.fairpointCentroid) {
         const el = document.createElement('div');
         el.className =
-          'w-8 h-8 rounded-full bg-intersection border-2 border-white shadow-2xl flex items-center justify-center animate-pulse cursor-pointer';
-        el.innerHTML = `<span style="font-size: 10px; font-weight: 800; color: white;">FP</span>`;
+          'w-9 h-9 rounded-full bg-intersection border-2 border-white shadow-2xl flex items-center justify-center animate-pulse cursor-pointer';
+        el.innerHTML = `<span style="font-size: 11px; font-weight: 800; color: white;">FP</span>`;
 
         const marker = new maplibregl.Marker({ element: el })
           .setLngLat(data.fairpointCentroid)
@@ -171,11 +209,19 @@ export const MapCanvas = forwardRef<MapCanvasHandle, MapCanvasProps>(({
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: true }), 'top-right');
 
+    // Add map click listener: clicking the map should move the currently active participant's pin
+    map.on('click', (e) => {
+      // Trigger callback with clicked coordinates
+      if (onMapClickRef.current) {
+        onMapClickRef.current([e.lngLat.lng, e.lngLat.lat]);
+      }
+    });
+
     map.on('load', () => {
       mapInstanceRef.current = map;
       setIsLoaded(true);
       if (isochroneData) {
-        updateIsochroneLayers(map, isochroneData);
+        updateIsochroneLayers(map, isochroneData, activeUserId);
       }
       if (onMapReady) {
         onMapReady(map);
@@ -192,19 +238,19 @@ export const MapCanvas = forwardRef<MapCanvasHandle, MapCanvasProps>(({
     };
   }, []);
 
-  // Sync isochrone data updates to MapLibre layers & markers
+  // Sync isochrone data updates and active user changes to MapLibre layers & markers
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (map && isLoaded) {
-      updateIsochroneLayers(map, isochroneData);
+      updateIsochroneLayers(map, isochroneData, activeUserId);
     }
-  }, [isochroneData, isLoaded]);
+  }, [isochroneData, activeUserId, isLoaded]);
 
   return (
-    <div className="relative w-screen h-screen overflow-hidden">
+    <div className="relative w-full h-full overflow-hidden">
       <div
         ref={containerRef}
-        className={`w-screen h-screen absolute inset-0 z-0 ${className}`}
+        className={`w-full h-full absolute inset-0 z-0 ${className}`}
       />
       {!isLoaded && (
         <div className="absolute inset-0 z-[1] bg-slate-100 flex items-center justify-center animate-fade pointer-events-none">

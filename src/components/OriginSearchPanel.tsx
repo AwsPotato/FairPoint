@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Plus, 
   X, 
   Loader2, 
   MapPin, 
-  Sparkles 
+  Sparkles,
+  Search
 } from 'lucide-react';
 import { tokens } from '../tokens';
 
@@ -14,21 +15,33 @@ export interface Participant {
   id: 1 | 2 | 3 | 4;
   label: string;
   address: string;
+  coords: [number, number]; // [lng, lat]
   mode: TravelMode;
   color: string;
   colorName: string;
 }
 
+export interface GeocodingResult {
+  name: string;
+  description: string;
+  coords: [number, number]; // [lng, lat]
+}
+
 export interface OriginSearchPanelProps {
-  onFindFairPoint?: (participants: Participant[]) => Promise<void> | void;
+  participants: Participant[];
+  activeUserId: 1 | 2 | 3 | 4;
+  onActiveUserChange: (id: 1 | 2 | 3 | 4) => void;
+  onParticipantsChange: (participants: Participant[]) => void;
+  onLocationSelect: (id: 1 | 2 | 3 | 4, address: string, coords: [number, number]) => void;
+  onFindFairPoint: () => Promise<void> | void;
   className?: string;
 }
 
-const PARTICIPANT_DEFAULTS: Record<1 | 2 | 3 | 4, { label: string; color: string; colorName: string }> = {
-  1: { label: 'Person 1', color: tokens.colors.user1, colorName: 'Cobalt Blue' },
-  2: { label: 'Person 2', color: tokens.colors.user2, colorName: 'Rose Red' },
-  3: { label: 'Person 3', color: tokens.colors.user3, colorName: 'Emerald Green' },
-  4: { label: 'Person 4', color: tokens.colors.user4, colorName: 'Violet Purple' },
+const PARTICIPANT_DEFAULTS: Record<1 | 2 | 3 | 4, { label: string; color: string; colorName: string; defaultCoords: [number, number] }> = {
+  1: { label: 'Person 1', color: tokens.colors.user1, colorName: 'Cobalt Blue', defaultCoords: [8.532, 47.377] },
+  2: { label: 'Person 2', color: tokens.colors.user2, colorName: 'Rose Red', defaultCoords: [8.552, 47.388] },
+  3: { label: 'Person 3', color: tokens.colors.user3, colorName: 'Emerald Green', defaultCoords: [8.528, 47.362] },
+  4: { label: 'Person 4', color: tokens.colors.user4, colorName: 'Violet Purple', defaultCoords: [8.558, 47.365] },
 };
 
 const TRAVEL_MODES: { id: TravelMode; label: string; icon: string }[] = [
@@ -38,81 +51,147 @@ const TRAVEL_MODES: { id: TravelMode; label: string; icon: string }[] = [
 ];
 
 export const OriginSearchPanel: React.FC<OriginSearchPanelProps> = ({
+  participants,
+  activeUserId,
+  onActiveUserChange,
+  onParticipantsChange,
+  onLocationSelect,
   onFindFairPoint,
   className = '',
 }) => {
-  const [participants, setParticipants] = useState<Participant[]>([
-    {
-      id: 1,
-      label: PARTICIPANT_DEFAULTS[1].label,
-      address: '',
-      mode: 'transit',
-      color: PARTICIPANT_DEFAULTS[1].color,
-      colorName: PARTICIPANT_DEFAULTS[1].colorName,
-    },
-    {
-      id: 2,
-      label: PARTICIPANT_DEFAULTS[2].label,
-      address: '',
-      mode: 'transit',
-      color: PARTICIPANT_DEFAULTS[2].color,
-      colorName: PARTICIPANT_DEFAULTS[2].colorName,
-    },
-  ]);
-
   const [isLoading, setIsLoading] = useState(false);
+  const [activeDropdownUser, setActiveDropdownUser] = useState<(1 | 2 | 3 | 4) | null>(null);
+  const [suggestions, setSuggestions] = useState<GeocodingResult[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+
+  const searchAbortController = useRef<AbortController | null>(null);
+  const debounceTimer = useRef<number | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Close suggestions when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setActiveDropdownUser(null);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
 
   const handleAddPerson = () => {
     if (participants.length >= 4) return;
 
-    // Check which IDs are already used
     const existingIds = new Set(participants.map((p) => p.id));
     const nextId = ([3, 4] as const).find((id) => !existingIds.has(id));
-
     if (!nextId) return;
 
+    const defaults = PARTICIPANT_DEFAULTS[nextId];
     const newParticipant: Participant = {
       id: nextId,
-      label: PARTICIPANT_DEFAULTS[nextId].label,
+      label: defaults.label,
       address: '',
+      coords: defaults.defaultCoords,
       mode: 'transit',
-      color: PARTICIPANT_DEFAULTS[nextId].color,
-      colorName: PARTICIPANT_DEFAULTS[nextId].colorName,
+      color: defaults.color,
+      colorName: defaults.colorName,
     };
 
-    // Keep sorted by ID
     const updated = [...participants, newParticipant].sort((a, b) => a.id - b.id);
-    setParticipants(updated);
+    onParticipantsChange(updated);
+    onActiveUserChange(nextId);
   };
 
   const handleRemovePerson = (id: 1 | 2 | 3 | 4) => {
-    // Cannot remove Person 1 or 2
     if (id === 1 || id === 2) return;
-    setParticipants((prev) => prev.filter((p) => p.id !== id));
+    const updated = participants.filter((p) => p.id !== id);
+    onParticipantsChange(updated);
+    if (activeUserId === id) {
+      onActiveUserChange(1);
+    }
   };
 
-  const handleAddressChange = (id: 1 | 2 | 3 | 4, value: string) => {
-    setParticipants((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, address: value } : p))
-    );
+  // Perform geocoding search via Photon API with debounce
+  const fetchSuggestions = (query: string, userId: 1 | 2 | 3 | 4) => {
+    if (debounceTimer.current) {
+      window.clearTimeout(debounceTimer.current);
+    }
+
+    if (!query || query.trim().length < 2) {
+      setSuggestions([]);
+      setIsSearching(false);
+      return;
+    }
+
+    setIsSearching(true);
+    setActiveDropdownUser(userId);
+
+    debounceTimer.current = window.setTimeout(async () => {
+      if (searchAbortController.current) {
+        searchAbortController.current.abort();
+      }
+      searchAbortController.current = new AbortController();
+
+      try {
+        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(query.trim())}&limit=5&lang=en`;
+        const res = await fetch(url, { signal: searchAbortController.current.signal });
+        if (!res.ok) throw new Error('Geocoding search failed');
+        const data = await res.json();
+
+        // Map photon GeoJSON features to clean GeocodingResult objects
+        const results: GeocodingResult[] = (data.features || []).map((f: any) => {
+          const props = f.properties || {};
+          const name = props.name || props.street || 'Selected Location';
+          const details = [
+            props.housenumber ? `${props.housenumber} ${props.street || ''}`.trim() : props.street,
+            props.district,
+            props.city,
+            props.state,
+            props.country,
+          ].filter(Boolean).join(', ');
+
+          return {
+            name,
+            description: details || props.country || '',
+            coords: f.geometry.coordinates as [number, number],
+          };
+        });
+
+        setSuggestions(results);
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          console.warn('Geocoding error:', err);
+        }
+      } finally {
+        setIsSearching(false);
+      }
+    }, 280);
+  };
+
+  const handleAddressInputChange = (id: 1 | 2 | 3 | 4, value: string) => {
+    onActiveUserChange(id);
+    const updated = participants.map((p) => (p.id === id ? { ...p, address: value } : p));
+    onParticipantsChange(updated);
+    fetchSuggestions(value, id);
+  };
+
+  const handleSelectSuggestion = (userId: 1 | 2 | 3 | 4, item: GeocodingResult) => {
+    const fullText = item.description ? `${item.name}, ${item.description}` : item.name;
+    setActiveDropdownUser(null);
+    setSuggestions([]);
+    onLocationSelect(userId, fullText, item.coords);
   };
 
   const handleModeChange = (id: 1 | 2 | 3 | 4, mode: TravelMode) => {
-    setParticipants((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, mode } : p))
-    );
+    const updated = participants.map((p) => (p.id === id ? { ...p, mode } : p));
+    onParticipantsChange(updated);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     try {
-      if (onFindFairPoint) {
-        await onFindFairPoint(participants);
-      } else {
-        // Default simulated action
-        await new Promise((resolve) => setTimeout(resolve, 800));
-      }
+      await onFindFairPoint();
     } finally {
       setIsLoading(false);
     }
@@ -120,9 +199,10 @@ export const OriginSearchPanel: React.FC<OriginSearchPanelProps> = ({
 
   return (
     <div
+      ref={containerRef}
       className={`bg-white/95 backdrop-blur-md rounded-2xl shadow-xl border border-slate-200 p-4 w-96 pointer-events-auto transition-all ${className}`}
     >
-      {/* Header */}
+      {/* Card Header */}
       <div className="flex items-center justify-between pb-3 border-b border-slate-100">
         <div className="flex items-center space-x-2">
           <div className="w-7 h-7 rounded-lg bg-amber-500/10 flex items-center justify-center text-amber-600 border border-amber-500/20">
@@ -132,9 +212,9 @@ export const OriginSearchPanel: React.FC<OriginSearchPanelProps> = ({
             Meeting Origins
           </h2>
         </div>
-        <span className="text-[11px] font-medium text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">
-          {participants.length} / 4 People
-        </span>
+        <div className="flex items-center gap-1.5 text-[11px] text-slate-500 font-medium bg-slate-100 px-2 py-0.5 rounded-full">
+          <span>{participants.length} / 4 People</span>
+        </div>
       </div>
 
       {/* Participants Form */}
@@ -142,33 +222,46 @@ export const OriginSearchPanel: React.FC<OriginSearchPanelProps> = ({
         <div className="space-y-3">
           {participants.map((person) => {
             const canRemove = person.id === 3 || person.id === 4;
+            const isCurrentActive = activeUserId === person.id;
+            const showDropdown = activeDropdownUser === person.id && suggestions.length > 0;
 
             return (
               <div
                 key={person.id}
-                className="bg-slate-50/80 rounded-xl p-3 border border-slate-200/70 space-y-2 transition-all hover:border-slate-300"
+                onClick={() => onActiveUserChange(person.id)}
+                className={`relative rounded-xl p-3 border transition-all cursor-pointer ${
+                  isCurrentActive
+                    ? 'bg-blue-50/20 border-slate-400 ring-2 ring-slate-400/20'
+                    : 'bg-slate-50/80 border-slate-200/80 hover:border-slate-300'
+                }`}
               >
                 {/* Person Header */}
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-2">
-                    {/* User Accent Dot */}
                     <span
-                      className="w-2.5 h-2.5 rounded-full ring-2 ring-white shadow-sm flex-shrink-0"
+                      className="w-2.5 h-2.5 rounded-full ring-2 ring-white shadow-xs flex-shrink-0"
                       style={{ backgroundColor: person.color }}
                     />
-                    <span className="text-xs font-semibold text-slate-700">
+                    <span className="text-xs font-semibold text-slate-800">
                       {person.label}
                     </span>
                     <span className="text-[10px] text-slate-400 font-mono">
                       ({person.colorName})
                     </span>
+                    {isCurrentActive && (
+                      <span className="text-[9px] bg-slate-200 text-slate-700 px-1.5 py-0.2 rounded font-medium">
+                        Active Pin
+                      </span>
+                    )}
                   </div>
 
-                  {/* Remove Button for User 3 and 4 only */}
                   {canRemove && (
                     <button
                       type="button"
-                      onClick={() => handleRemovePerson(person.id)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleRemovePerson(person.id);
+                      }}
                       className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 p-1 rounded-md transition-colors"
                       title={`Remove ${person.label}`}
                     >
@@ -177,22 +270,62 @@ export const OriginSearchPanel: React.FC<OriginSearchPanelProps> = ({
                   )}
                 </div>
 
-                {/* Address Input */}
-                <div className="relative">
+                {/* Address Input with Geocoding */}
+                <div className="relative mt-2">
                   <div className="absolute inset-y-0 left-0 pl-2.5 flex items-center pointer-events-none text-slate-400">
-                    <MapPin className="w-3.5 h-3.5" />
+                    {isSearching && activeDropdownUser === person.id ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-500" />
+                    ) : (
+                      <MapPin className="w-3.5 h-3.5" />
+                    )}
                   </div>
                   <input
                     type="text"
                     value={person.address}
-                    onChange={(e) => handleAddressChange(person.id, e.target.value)}
-                    placeholder={`Enter ${person.label}'s starting location...`}
-                    className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-offset-1 transition-all"
-                    style={{
-                      // Focused ring matches participant theme color dynamically
-                      outlineColor: person.color,
+                    onFocus={() => {
+                      onActiveUserChange(person.id);
+                      if (person.address.length >= 2) {
+                        fetchSuggestions(person.address, person.id);
+                      }
                     }}
+                    onChange={(e) => handleAddressInputChange(person.id, e.target.value)}
+                    placeholder={`Enter address or click map for ${person.label}...`}
+                    className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-offset-1 transition-all"
+                    style={{ outlineColor: person.color }}
                   />
+
+                  {/* Geocoding Suggestions Dropdown */}
+                  {showDropdown && (
+                    <div className="absolute left-0 right-0 top-full mt-1.5 bg-white/98 backdrop-blur-md rounded-xl shadow-2xl border border-slate-200 z-50 overflow-hidden divide-y divide-slate-100 max-h-56 overflow-y-auto">
+                      <div className="px-3 py-1 bg-slate-50 text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex items-center justify-between">
+                        <span>Suggested Locations</span>
+                        <Search className="w-3 h-3 text-slate-400" />
+                      </div>
+                      {suggestions.map((item, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleSelectSuggestion(person.id, item);
+                          }}
+                          className="w-full text-left px-3 py-2 hover:bg-amber-50/70 transition-colors flex items-start space-x-2 group"
+                        >
+                          <MapPin className="w-3.5 h-3.5 text-slate-400 group-hover:text-amber-500 flex-shrink-0 mt-0.5" />
+                          <div className="overflow-hidden">
+                            <div className="text-xs font-semibold text-slate-800 truncate">
+                              {item.name}
+                            </div>
+                            {item.description && (
+                              <div className="text-[10px] text-slate-500 truncate">
+                                {item.description}
+                              </div>
+                            )}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 {/* Inline Segmented Travel Mode Toggle */}
@@ -208,7 +341,10 @@ export const OriginSearchPanel: React.FC<OriginSearchPanelProps> = ({
                         <button
                           key={mode.id}
                           type="button"
-                          onClick={() => handleModeChange(person.id, mode.id)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleModeChange(person.id, mode.id);
+                          }}
                           className={`flex items-center space-x-1 px-2 py-1 rounded-md text-[11px] font-medium transition-all ${
                             isActive
                               ? 'bg-white text-slate-800 shadow-xs'
@@ -227,7 +363,7 @@ export const OriginSearchPanel: React.FC<OriginSearchPanelProps> = ({
           })}
         </div>
 
-        {/* Add Person Button (Capped strictly at 4) */}
+        {/* Add Person Button (Capped at 4) */}
         {participants.length < 4 && (
           <button
             type="button"
