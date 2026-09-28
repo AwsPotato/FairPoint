@@ -133,19 +133,24 @@ export const OriginSearchPanel: React.FC<OriginSearchPanelProps> = ({
       searchAbortController.current = new AbortController();
 
       try {
-        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(query.trim())}&limit=5&lang=en`;
-        const res = await fetch(url, { signal: searchAbortController.current.signal });
+        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query.trim())}&limit=5&addressdetails=1`;
+        const res = await fetch(url, { 
+          signal: searchAbortController.current.signal,
+          headers: {
+            'User-Agent': 'FairPoint App (contact@fairpoint.example.com)'
+          }
+        });
         if (!res.ok) throw new Error('Geocoding search failed');
         const data = await res.json();
 
-        // Map photon GeoJSON features to clean GeocodingResult objects
-        const results: GeocodingResult[] = (data.features || []).map((f: any) => {
-          const props = f.properties || {};
-          const name = props.name || props.street || 'Selected Location';
+        // Map Nominatim features to GeocodingResult objects
+        const results: GeocodingResult[] = (data || []).map((item: any) => {
+          const props = item.address || {};
+          const name = item.name || props.road || props.pedestrian || 'Selected Location';
           const details = [
-            props.housenumber ? `${props.housenumber} ${props.street || ''}`.trim() : props.street,
-            props.district,
-            props.city,
+            props.house_number ? `${props.house_number} ${props.road || ''}`.trim() : props.road,
+            props.suburb || props.neighbourhood,
+            props.city || props.town || props.village,
             props.state,
             props.country,
           ].filter(Boolean).join(', ');
@@ -153,7 +158,7 @@ export const OriginSearchPanel: React.FC<OriginSearchPanelProps> = ({
           return {
             name,
             description: details || props.country || '',
-            coords: f.geometry.coordinates as [number, number],
+            coords: [parseFloat(item.lon), parseFloat(item.lat)] as [number, number],
           };
         });
 

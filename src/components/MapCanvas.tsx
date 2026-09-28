@@ -7,9 +7,12 @@ export interface MapCanvasProps {
   initialZoom?: number;
   styleUrl?: string;
   isochroneData?: IsochroneComputationResult | null;
+  venues?: any[]; // using any temporarily, or we can import Venue
+  activeVenueId?: string | null;
   activeUserId?: 1 | 2 | 3 | 4;
   onUserMarkerDragEnd?: (userId: 1 | 2 | 3 | 4, coords: [number, number]) => void;
   onMapClick?: (coords: [number, number]) => void;
+  onVenueClick?: (venueId: string) => void;
   onMapReady?: (map: maplibregl.Map) => void;
   className?: string;
 }
@@ -21,9 +24,12 @@ export const MapCanvas = forwardRef<MapCanvasHandle, MapCanvasProps>(({
   initialZoom = 13,
   styleUrl = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
   isochroneData,
+  venues = [],
+  activeVenueId = null,
   activeUserId = 1,
   onUserMarkerDragEnd,
   onMapClick,
+  onVenueClick,
   onMapReady,
   className = '',
 }, ref) => {
@@ -36,6 +42,9 @@ export const MapCanvas = forwardRef<MapCanvasHandle, MapCanvasProps>(({
   const onUserMarkerDragEndRef = useRef(onUserMarkerDragEnd);
   onUserMarkerDragEndRef.current = onUserMarkerDragEnd;
 
+  const onVenueClickRef = useRef(onVenueClick);
+  onVenueClickRef.current = onVenueClick;
+
   const onMapClickRef = useRef(onMapClick);
   onMapClickRef.current = onMapClick;
 
@@ -45,10 +54,12 @@ export const MapCanvas = forwardRef<MapCanvasHandle, MapCanvasProps>(({
   const updateIsochroneLayers = (
     map: maplibregl.Map,
     data: IsochroneComputationResult | null | undefined,
-    currentActiveId: 1 | 2 | 3 | 4
+    currentActiveId: 1 | 2 | 3 | 4,
+    currentVenues: any[],
+    currentActiveVenueId: string | null
   ) => {
     if (!map.isStyleLoaded()) {
-      map.once('style.load', () => updateIsochroneLayers(map, data, currentActiveId));
+      map.once('style.load', () => updateIsochroneLayers(map, data, currentActiveId, currentVenues, currentActiveVenueId));
       return;
     }
 
@@ -125,6 +136,80 @@ export const MapCanvas = forwardRef<MapCanvasHandle, MapCanvasProps>(({
     // 3. Clear existing markers
     markersRef.current.forEach((m) => m.remove());
     markersRef.current = [];
+
+    // Render venues (capped top recommendations)
+    currentVenues.slice(0, 30).forEach((v) => {
+      const isSelected = v.id === currentActiveVenueId;
+      const el = document.createElement('div');
+      
+      const icon = v.type === 'cafe' ? '☕' : v.type === 'bar' ? '🍸' : '🍽️';
+      const bgColor = v.type === 'cafe' ? 'bg-amber-600' : v.type === 'bar' ? 'bg-purple-600' : 'bg-rose-600';
+
+      el.className = `w-7 h-7 rounded-full border-2 border-white shadow-xl flex items-center justify-center transition-all cursor-pointer select-none ${
+        isSelected 
+          ? 'ring-4 ring-offset-1 ring-indigo-500 scale-125 z-50 ' + bgColor 
+          : 'hover:scale-115 opacity-90 hover:opacity-100 ' + bgColor
+      }`;
+      el.innerHTML = `<span style="font-size: 11px; line-height: 1;">${icon}</span>`;
+
+      const marker = new maplibregl.Marker({ element: el })
+        .setLngLat(v.coords)
+        .addTo(map);
+      
+      const realPhotoBadge = v.isRealPhoto 
+        ? `<span style="font-size: 8px; font-weight: 800; background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; padding: 2px 5px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px;">📸 Real Photo</span>`
+        : '';
+
+      const popupHtml = `
+        <div style="font-family: system-ui, -apple-system, sans-serif; width: 220px; overflow: hidden; border-radius: 12px; background: white;">
+          ${v.imageUrl ? `
+            <div style="position: relative; width: 100%; height: 105px; background-image: url('${v.imageUrl}'); background-size: cover; background-position: center; border-radius: 12px 12px 0 0;">
+              ${v.isRealPhoto ? `<div style="position: absolute; bottom: 6px; left: 6px;">${realPhotoBadge}</div>` : ''}
+            </div>` : ''}
+          <div style="padding: 10px;">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px;">
+              <span style="font-size: 9px; font-weight: 700; text-transform: uppercase; background: #e0e7ff; color: #4338ca; padding: 2px 6px; border-radius: 6px;">${v.type}</span>
+              <span style="font-size: 11px; font-weight: 800; color: #059669;">${v.matchScore}% Match</span>
+            </div>
+            <strong style="color: #0f172a; font-size: 13px; display: block; line-height: 1.25; margin-bottom: 4px;">${v.name}</strong>
+            <div style="font-size: 11px; color: #475569; display: flex; gap: 8px; margin-bottom: 6px;">
+              <span>P1: <b>${v.timeA} min</b></span>
+              <span>P2: <b>${v.timeB} min</b></span>
+            </div>
+            <div style="font-size: 10px; color: #94a3b8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 8px;">
+              ${v.address}
+            </div>
+            ${v.googleMapsUrl ? `
+              <a href="${v.googleMapsUrl}" target="_blank" rel="noopener noreferrer" style="display: flex; align-items: center; justify-content: center; gap: 4px; width: 100%; padding: 5px 0; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 10px; font-weight: 700; color: #334155; text-decoration: none; cursor: pointer;">
+                🗺️ View on Google Maps
+              </a>
+            ` : ''}
+          </div>
+        </div>
+      `;
+
+      const popup = new maplibregl.Popup({ 
+        offset: 18, 
+        closeButton: true,
+        maxWidth: '240px',
+        className: 'fairpoint-popup'
+      }).setHTML(popupHtml);
+
+      marker.setPopup(popup);
+
+      if (isSelected) {
+        marker.togglePopup();
+      }
+
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (onVenueClickRef.current) {
+          onVenueClickRef.current(v.id);
+        }
+      });
+
+      markersRef.current.push(marker);
+    });
 
     if (data) {
       // User origin centroid markers (DRAGGABLE)
@@ -221,7 +306,7 @@ export const MapCanvas = forwardRef<MapCanvasHandle, MapCanvasProps>(({
       mapInstanceRef.current = map;
       setIsLoaded(true);
       if (isochroneData) {
-        updateIsochroneLayers(map, isochroneData, activeUserId);
+        updateIsochroneLayers(map, isochroneData, activeUserId, venues, activeVenueId);
       }
       if (onMapReady) {
         onMapReady(map);
@@ -242,9 +327,9 @@ export const MapCanvas = forwardRef<MapCanvasHandle, MapCanvasProps>(({
   useEffect(() => {
     const map = mapInstanceRef.current;
     if (map && isLoaded) {
-      updateIsochroneLayers(map, isochroneData, activeUserId);
+      updateIsochroneLayers(map, isochroneData, activeUserId, venues, activeVenueId);
     }
-  }, [isochroneData, activeUserId, isLoaded]);
+  }, [isochroneData, activeUserId, isLoaded, venues, activeVenueId]);
 
   return (
     <div className="relative w-full h-full overflow-hidden">
